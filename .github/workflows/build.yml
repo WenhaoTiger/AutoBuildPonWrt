@@ -19,10 +19,9 @@ env:
 
 jobs:
 
-  # ============================================================
+  # ==========================================================
   # 检查 pbs05/ponwrt 是否更新
-  # ============================================================
-
+  # ==========================================================
   check-update:
     name: Check PonWrt Update
     runs-on: ubuntu-24.04
@@ -35,35 +34,35 @@ jobs:
 
     steps:
 
-      # ----------------------------------------------------------
+      # --------------------------------------------------------
       # Checkout 当前构建仓库
-      # ----------------------------------------------------------
-
+      # --------------------------------------------------------
       - name: Checkout build repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 1
 
-      # ----------------------------------------------------------
-      # 检查 PonWrt 最新 commit
-      # ----------------------------------------------------------
-
+      # --------------------------------------------------------
+      # 获取上游最新 commit
+      # --------------------------------------------------------
       - name: Check latest PonWrt commit
         id: version
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "========================================"
           echo "Checking PonWrt"
           echo "========================================"
 
-          COMMIT=$(git ls-remote \
-            "${PONWRT_REPO}" \
-            "refs/heads/${PONWRT_BRANCH}" \
-            | awk '{print $1}')
+          COMMIT="$(
+            git ls-remote \
+              "${PONWRT_REPO}" \
+              "refs/heads/${PONWRT_BRANCH}" \
+              | awk '{print $1}'
+          )"
 
-          if [ -z "$COMMIT" ]; then
+          if [ -z "${COMMIT}" ]; then
             echo "ERROR: Unable to get PonWrt commit."
             exit 1
           fi
@@ -73,73 +72,69 @@ jobs:
 
           echo
           echo "Latest PonWrt commit:"
-          echo "$COMMIT"
+          echo "${COMMIT}"
 
           echo
           echo "Short commit:"
-          echo "$SHORT_COMMIT"
+          echo "${SHORT_COMMIT}"
 
           echo
           echo "Release tag:"
-          echo "$TAG"
+          echo "${TAG}"
 
-          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
-          echo "short_commit=$SHORT_COMMIT" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "commit=${COMMIT}" >> "${GITHUB_OUTPUT}"
+          echo "short_commit=${SHORT_COMMIT}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
 
-          # ------------------------------------------------------
+          # ----------------------------------------------------
           # 手动运行：强制编译
-          # ------------------------------------------------------
-
+          # ----------------------------------------------------
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo
             echo "Manual workflow dispatch detected."
             echo "Build will be forced."
 
-            echo "need_build=true" >> "$GITHUB_OUTPUT"
+            echo "need_build=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
-          # ------------------------------------------------------
+          # ----------------------------------------------------
           # 自动运行：
           # 检查这个 commit 是否已经成功发布
-          # ------------------------------------------------------
-
+          # ----------------------------------------------------
           echo
           echo "Checking existing release..."
 
-          HTTP_CODE=$(curl \
-            --silent \
-            --output /dev/null \
-            --write-out "%{http_code}" \
-            --header "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}")
+          HTTP_CODE="$(
+            curl \
+              --silent \
+              --show-error \
+              --output /dev/null \
+              --write-out "%{http_code}" \
+              --header "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}"
+          )"
 
-          echo "GitHub API response: $HTTP_CODE"
+          echo "GitHub API response: ${HTTP_CODE}"
 
-          if [ "$HTTP_CODE" = "200" ]; then
-
+          if [ "${HTTP_CODE}" = "200" ]; then
             echo
             echo "This PonWrt commit has already been built."
             echo "Skipping build."
 
-            echo "need_build=false" >> "$GITHUB_OUTPUT"
-
+            echo "need_build=false" >> "${GITHUB_OUTPUT}"
           else
-
             echo
-            echo "New PonWrt commit detected."
+            echo "This PonWrt commit has not been built yet."
             echo "Build required."
 
-            echo "need_build=true" >> "$GITHUB_OUTPUT"
-
+            echo "need_build=true" >> "${GITHUB_OUTPUT}"
           fi
 
 
-  # ============================================================
-  # 编译 AN7581 / HG5382A
-  # ============================================================
-
+  # ==========================================================
+  # 编译 PonWrt
+  # ==========================================================
   build:
     name: Build AN7581 HG5382A
 
@@ -151,32 +146,131 @@ jobs:
 
     steps:
 
-      # ==========================================================
-      # Clone PonWrt
-      # ==========================================================
+      # ========================================================
+      # 非常重要：
+      # 每个 Job 都是独立 Runner
+      # 所以这里必须再次 checkout 当前仓库
+      # 这样才能拿到 hg5382a.config
+      # ========================================================
+      - name: Checkout build repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
 
-      - name: Clone PonWrt
+      # ========================================================
+      # 检查自定义配置文件
+      # ========================================================
+      - name: Verify custom configuration
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Verify custom configuration"
+          echo "========================================"
+
+          CONFIG_FILE="${GITHUB_WORKSPACE}/hg5382a.config"
+
+          echo "Workspace:"
+          echo "${GITHUB_WORKSPACE}"
+
+          echo
+          echo "Config file:"
+          echo "${CONFIG_FILE}"
+
+          if [ ! -f "${CONFIG_FILE}" ]; then
+            echo
+            echo "ERROR: hg5382a.config not found."
+            echo
+            echo "Workspace contents:"
+            find "${GITHUB_WORKSPACE}" -maxdepth 2 -type f | sort
+            exit 1
+          fi
+
+          echo
+          echo "hg5382a.config found."
+
+          echo
+          echo "File size:"
+          wc -l "${CONFIG_FILE}"
+
+          echo
+          echo "Target configuration:"
+          grep -E \
+            '^CONFIG_TARGET_airoha|^CONFIG_TARGET_DEVICE_airoha' \
+            "${CONFIG_FILE}" || true
+
+      # ========================================================
+      # Clone PonWrt
+      #
+      # 注意：
+      # 不直接 clone 最新 master 后编译。
+      # 而是 checkout check-update 检查到的那个 commit。
+      #
+      # 这样可以保证：
+      #
+      # 检查 commit = 实际编译 commit
+      # ========================================================
+      - name: Clone PonWrt
+        shell: bash
+        run: |
+          set -euo pipefail
 
           echo "========================================"
           echo "Clone PonWrt"
           echo "========================================"
 
           git clone \
-            --depth=1 \
-            --branch "${PONWRT_BRANCH}" \
             "${PONWRT_REPO}" \
             ponwrt
 
-      # ==========================================================
-      # 显示 PonWrt 版本
-      # ==========================================================
+          cd ponwrt
 
+          echo
+          echo "Fetching target commit..."
+
+          git fetch \
+            --depth=1 \
+            origin \
+            "${{ needs.check-update.outputs.commit }}"
+
+          git checkout \
+            --detach \
+            "${{ needs.check-update.outputs.commit }}"
+
+          echo
+          echo "PonWrt commit:"
+          git rev-parse HEAD
+
+          echo
+          echo "Expected commit:"
+          echo "${{ needs.check-update.outputs.commit }}"
+
+          # ----------------------------------------------------
+          # 验证实际 checkout 的 commit
+          # ----------------------------------------------------
+          ACTUAL_COMMIT="$(git rev-parse HEAD)"
+          EXPECTED_COMMIT="${{ needs.check-update.outputs.commit }}"
+
+          if [ "${ACTUAL_COMMIT}" != "${EXPECTED_COMMIT}" ]; then
+            echo
+            echo "ERROR: PonWrt commit mismatch!"
+            echo "Actual:   ${ACTUAL_COMMIT}"
+            echo "Expected: ${EXPECTED_COMMIT}"
+            exit 1
+          fi
+
+          echo
+          echo "Commit verification passed."
+
+      # ========================================================
+      # 显示 PonWrt 版本
+      # ========================================================
       - name: Show PonWrt version
         working-directory: ponwrt
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "========================================"
           echo "PonWrt version"
@@ -188,13 +282,17 @@ jobs:
           echo "Full commit:"
           git rev-parse HEAD
 
-      # ==========================================================
-      # 安装编译依赖
-      # ==========================================================
+          echo
+          echo "Remote:"
+          git remote -v
 
+      # ========================================================
+      # 安装编译依赖
+      # ========================================================
       - name: Install build dependencies
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "========================================"
           echo "Install build dependencies"
@@ -280,14 +378,14 @@ jobs:
             zlib1g-dev \
             zstd
 
-      # ==========================================================
+      # ========================================================
       # 更新 feeds
-      # ==========================================================
-
+      # ========================================================
       - name: Update feeds
         working-directory: ponwrt
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "========================================"
           echo "Update feeds"
@@ -296,32 +394,38 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # ==========================================================
-      # 使用仓库中的 hg5382a.config
-      # ==========================================================
-
+      # ========================================================
+      # 使用自定义 hg5382a.config
+      # ========================================================
       - name: Configure HG5382A
         working-directory: ponwrt
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "========================================"
           echo "Configure HG5382A"
           echo "========================================"
 
-          if [ ! -f ../hg5382a.config ]; then
-            echo "ERROR: hg5382a.config not found."
+          CONFIG_FILE="${GITHUB_WORKSPACE}/hg5382a.config"
+
+          if [ ! -f "${CONFIG_FILE}" ]; then
+            echo "ERROR: ${CONFIG_FILE} not found."
             exit 1
           fi
 
-          cp ../hg5382a.config .config
+          echo
+          echo "Using:"
+          echo "${CONFIG_FILE}"
+
+          cp "${CONFIG_FILE}" .config
 
           echo
           echo "Target configuration before defconfig:"
           echo "----------------------------------------"
 
           grep -E \
-            'CONFIG_TARGET_airoha|CONFIG_TARGET_DEVICE_airoha' \
+            '^CONFIG_TARGET_airoha|^CONFIG_TARGET_DEVICE_airoha' \
             .config || true
 
           echo
@@ -330,14 +434,14 @@ jobs:
 
           make defconfig
 
-      # ==========================================================
+      # ========================================================
       # 验证目标设备
-      # ==========================================================
-
+      # ========================================================
       - name: Verify HG5382A target
         working-directory: ponwrt
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "========================================"
           echo "Verify target"
@@ -353,7 +457,9 @@ jobs:
 
           echo
           echo "HG5382A:"
-          grep '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5382a=y$' .config
+          grep \
+            '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5382a=y$' \
+            .config
 
           echo
           echo "Architecture:"
@@ -363,14 +469,43 @@ jobs:
           echo "CPU:"
           grep '^CONFIG_CPU_TYPE=' .config || true
 
-      # ==========================================================
-      # 编译
-      # ==========================================================
+          echo
+          echo "Linux version:"
+          grep '^CONFIG_LINUX_' .config || true
 
+      # ========================================================
+      # 显示最终配置摘要
+      # ========================================================
+      - name: Show final configuration summary
+        working-directory: ponwrt
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Final configuration summary"
+          echo "========================================"
+
+          echo
+          echo "Target:"
+          grep '^CONFIG_TARGET_airoha' .config || true
+
+          echo
+          echo "Device:"
+          grep '^CONFIG_TARGET_DEVICE_airoha' .config || true
+
+          echo
+          echo "Packages:"
+          grep '^CONFIG_PACKAGE_' .config | sort || true
+
+      # ========================================================
+      # 编译
+      # ========================================================
       - name: Build PonWrt AN7581
         working-directory: ponwrt
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "========================================"
           echo "Build PonWrt AN7581 HG5382A"
@@ -385,14 +520,14 @@ jobs:
 
           make -j"$(nproc)"
 
-      # ==========================================================
+      # ========================================================
       # 检查编译结果
-      # ==========================================================
-
+      # ========================================================
       - name: Verify build output
         working-directory: ponwrt
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "========================================"
           echo "Verify build output"
@@ -406,6 +541,10 @@ jobs:
           fi
 
           echo
+          echo "Target directory:"
+          echo "${TARGET_DIR}"
+
+          echo
           echo "Firmware files:"
           echo "----------------------------------------"
 
@@ -417,19 +556,20 @@ jobs:
 
           echo
           echo "File count:"
+
           find "${TARGET_DIR}" \
             -maxdepth 1 \
             -type f \
             | wc -l
 
-      # ==========================================================
+      # ========================================================
       # 生成 SHA256
-      # ==========================================================
-
+      # ========================================================
       - name: Generate SHA256SUMS
         working-directory: ponwrt
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "${TARGET_DIR}"
 
@@ -456,30 +596,45 @@ jobs:
             > SHA256SUMS
 
           echo
+          echo "SHA256:"
+          echo "----------------------------------------"
+
           cat SHA256SUMS
 
-      # ==========================================================
+      # ========================================================
       # 保存最终 .config
-      # ==========================================================
-
+      # ========================================================
       - name: Save final configuration
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cp \
             ponwrt/.config \
             "ponwrt/${TARGET_DIR}/hg5382a.final.config"
 
-      # ==========================================================
-      # 保存编译信息
-      # ==========================================================
+      # ========================================================
+      # 保存原始配置
+      # ========================================================
+      - name: Save source configuration
+        shell: bash
+        run: |
+          set -euo pipefail
 
+          cp \
+            "${GITHUB_WORKSPACE}/hg5382a.config" \
+            "ponwrt/${TARGET_DIR}/hg5382a.config"
+
+      # ========================================================
+      # 保存编译信息
+      # ========================================================
       - name: Generate build information
         working-directory: ponwrt
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          COMMIT=$(git rev-parse HEAD)
+          COMMIT="$(git rev-parse HEAD)"
 
           cat > "${TARGET_DIR}/BUILD_INFO.txt" <<EOF
           PonWrt Build Information
@@ -507,12 +662,12 @@ jobs:
           $(date -u '+%Y-%m-%d %H:%M:%S UTC')
           EOF
 
+          echo
           cat "${TARGET_DIR}/BUILD_INFO.txt"
 
-      # ==========================================================
+      # ========================================================
       # 上传 GitHub Actions Artifact
-      # ==========================================================
-
+      # ========================================================
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
@@ -521,14 +676,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # ==========================================================
+      # ========================================================
       # 创建 GitHub Release
-      # ==========================================================
-
+      # ========================================================
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.check-update.outputs.tag }}
+
           name: PonWrt AN7581 HG5382A ${{ needs.check-update.outputs.short_commit }}
 
           body: |
@@ -540,19 +695,27 @@ jobs:
             - Branch: `${{ env.PONWRT_BRANCH }}`
             - Commit: `${{ needs.check-update.outputs.commit }}`
 
-            Target:
+            ### Target
 
             - Airoha AN7581
             - FiberHome HG5382A
 
-            Configuration:
+            ### Configuration
 
-            - `hg5382a.config`
-
-            Build:
-
+            - Custom `hg5382a.config`
             - `make defconfig`
+
+            ### Build
+
             - `make -j$(nproc)`
+
+            ### Included files
+
+            - Firmware images
+            - `SHA256SUMS`
+            - `hg5382a.config`
+            - `hg5382a.final.config`
+            - `BUILD_INFO.txt`
 
           generate_release_notes: true
 
