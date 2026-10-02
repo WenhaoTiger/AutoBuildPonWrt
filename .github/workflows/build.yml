@@ -25,7 +25,7 @@ jobs:
 
   check-update:
     name: Check PonWrt Update
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     outputs:
       commit: ${{ steps.version.outputs.commit }}
@@ -35,10 +35,18 @@ jobs:
 
     steps:
 
+      # ----------------------------------------------------------
+      # Checkout 当前构建仓库
+      # ----------------------------------------------------------
+
       - name: Checkout build repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 1
+
+      # ----------------------------------------------------------
+      # 检查 PonWrt 最新 commit
+      # ----------------------------------------------------------
 
       - name: Check latest PonWrt commit
         id: version
@@ -63,9 +71,17 @@ jobs:
           SHORT_COMMIT="${COMMIT:0:12}"
           TAG="ponwrt-an7581-${SHORT_COMMIT}"
 
-          echo "Latest commit : $COMMIT"
-          echo "Short commit  : $SHORT_COMMIT"
-          echo "Release tag   : $TAG"
+          echo
+          echo "Latest PonWrt commit:"
+          echo "$COMMIT"
+
+          echo
+          echo "Short commit:"
+          echo "$SHORT_COMMIT"
+
+          echo
+          echo "Release tag:"
+          echo "$TAG"
 
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
           echo "short_commit=$SHORT_COMMIT" >> "$GITHUB_OUTPUT"
@@ -86,7 +102,7 @@ jobs:
 
           # ------------------------------------------------------
           # 自动运行：
-          # 检查 GitHub Release 是否已经存在
+          # 检查这个 commit 是否已经成功发布
           # ------------------------------------------------------
 
           echo
@@ -102,17 +118,21 @@ jobs:
           echo "GitHub API response: $HTTP_CODE"
 
           if [ "$HTTP_CODE" = "200" ]; then
+
             echo
             echo "This PonWrt commit has already been built."
             echo "Skipping build."
 
             echo "need_build=false" >> "$GITHUB_OUTPUT"
+
           else
+
             echo
             echo "New PonWrt commit detected."
             echo "Build required."
 
             echo "need_build=true" >> "$GITHUB_OUTPUT"
+
           fi
 
 
@@ -139,6 +159,10 @@ jobs:
         run: |
           set -e
 
+          echo "========================================"
+          echo "Clone PonWrt"
+          echo "========================================"
+
           git clone \
             --depth=1 \
             --branch "${PONWRT_BRANCH}" \
@@ -146,17 +170,22 @@ jobs:
             ponwrt
 
       # ==========================================================
-      # 显示版本
+      # 显示 PonWrt 版本
       # ==========================================================
 
       - name: Show PonWrt version
         working-directory: ponwrt
         run: |
+          set -e
+
           echo "========================================"
           echo "PonWrt version"
           echo "========================================"
 
           git log -1 --oneline
+
+          echo
+          echo "Full commit:"
           git rev-parse HEAD
 
       # ==========================================================
@@ -166,6 +195,10 @@ jobs:
       - name: Install build dependencies
         run: |
           set -e
+
+          echo "========================================"
+          echo "Install build dependencies"
+          echo "========================================"
 
           sudo apt-get update
 
@@ -256,11 +289,15 @@ jobs:
         run: |
           set -e
 
+          echo "========================================"
+          echo "Update feeds"
+          echo "========================================"
+
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       # ==========================================================
-      # 使用仓库中的 HG5382A 配置
+      # 使用仓库中的 hg5382a.config
       # ==========================================================
 
       - name: Configure HG5382A
@@ -269,13 +306,18 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "Using HG5382A configuration"
+          echo "Configure HG5382A"
           echo "========================================"
+
+          if [ ! -f ../hg5382a.config ]; then
+            echo "ERROR: hg5382a.config not found."
+            exit 1
+          fi
 
           cp ../hg5382a.config .config
 
           echo
-          echo "Original configuration:"
+          echo "Target configuration before defconfig:"
           echo "----------------------------------------"
 
           grep -E \
@@ -289,31 +331,37 @@ jobs:
           make defconfig
 
       # ==========================================================
-      # 检查最终目标
+      # 验证目标设备
       # ==========================================================
 
-      - name: Verify target configuration
+      - name: Verify HG5382A target
         working-directory: ponwrt
         run: |
           set -e
 
           echo "========================================"
-          echo "Final target configuration"
+          echo "Verify target"
           echo "========================================"
 
-          grep -E \
-            'CONFIG_TARGET_airoha=y|CONFIG_TARGET_airoha_an7581=y|CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5382a=y' \
-            .config
+          echo
+          echo "Target:"
+          grep '^CONFIG_TARGET_airoha=y$' .config
 
           echo
-          echo "Checking target directory..."
+          echo "AN7581:"
+          grep '^CONFIG_TARGET_airoha_an7581=y$' .config
 
-          TARGET="bin/targets/airoha/an7581"
+          echo
+          echo "HG5382A:"
+          grep '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5382a=y$' .config
 
-          if [ ! -d "$TARGET" ]; then
-            echo "Target directory does not exist yet."
-            echo "This is normal before compilation."
-          fi
+          echo
+          echo "Architecture:"
+          grep '^CONFIG_TARGET_ARCH_PACKAGES=' .config || true
+
+          echo
+          echo "CPU:"
+          grep '^CONFIG_CPU_TYPE=' .config || true
 
       # ==========================================================
       # 编译
@@ -325,29 +373,54 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "Building PonWrt AN7581"
+          echo "Build PonWrt AN7581 HG5382A"
           echo "========================================"
+
+          echo
+          echo "CPU cores:"
+          nproc
+
+          echo
+          echo "Starting build..."
 
           make -j"$(nproc)"
 
       # ==========================================================
-      # 显示固件
+      # 检查编译结果
       # ==========================================================
 
-      - name: List firmware
+      - name: Verify build output
         working-directory: ponwrt
         run: |
           set -e
 
           echo "========================================"
-          echo "AN7581 firmware"
+          echo "Verify build output"
           echo "========================================"
+
+          if [ ! -d "${TARGET_DIR}" ]; then
+            echo
+            echo "ERROR: Target directory does not exist:"
+            echo "${TARGET_DIR}"
+            exit 1
+          fi
+
+          echo
+          echo "Firmware files:"
+          echo "----------------------------------------"
 
           find "${TARGET_DIR}" \
             -maxdepth 1 \
             -type f \
             -printf '%f\n' \
             | sort
+
+          echo
+          echo "File count:"
+          find "${TARGET_DIR}" \
+            -maxdepth 1 \
+            -type f \
+            | wc -l
 
       # ==========================================================
       # 生成 SHA256
@@ -361,41 +434,90 @@ jobs:
           cd "${TARGET_DIR}"
 
           echo "========================================"
-          echo "Generating SHA256SUMS"
+          echo "Generate SHA256SUMS"
           echo "========================================"
 
-          sha256sum \
-            *.bin \
-            *.itb \
-            *.img \
-            *.manifest \
-            *.json \
-            2>/dev/null \
-            > SHA256SUMS || true
+          rm -f SHA256SUMS
 
+          find . \
+            -maxdepth 1 \
+            -type f \
+            \( \
+              -name '*.bin' \
+              -o -name '*.itb' \
+              -o -name '*.img' \
+              -o -name '*.gz' \
+              -o -name '*.manifest' \
+              -o -name '*.json' \
+            \) \
+            -printf '%f\n' \
+            | sort \
+            | xargs -r sha256sum \
+            > SHA256SUMS
+
+          echo
           cat SHA256SUMS
 
       # ==========================================================
       # 保存最终 .config
       # ==========================================================
 
-      - name: Copy final configuration
+      - name: Save final configuration
         run: |
           set -e
 
-          cp ponwrt/.config \
+          cp \
+            ponwrt/.config \
             "ponwrt/${TARGET_DIR}/hg5382a.final.config"
 
       # ==========================================================
-      # 上传 Actions Artifact
+      # 保存编译信息
+      # ==========================================================
+
+      - name: Generate build information
+        working-directory: ponwrt
+        run: |
+          set -e
+
+          COMMIT=$(git rev-parse HEAD)
+
+          cat > "${TARGET_DIR}/BUILD_INFO.txt" <<EOF
+          PonWrt Build Information
+          =========================
+
+          Repository:
+          https://github.com/pbs05/ponwrt
+
+          Branch:
+          ${PONWRT_BRANCH}
+
+          Commit:
+          ${COMMIT}
+
+          Target:
+          Airoha AN7581
+
+          Device:
+          FiberHome HG5382A
+
+          Configuration:
+          hg5382a.config
+
+          Build time:
+          $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          EOF
+
+          cat "${TARGET_DIR}/BUILD_INFO.txt"
+
+      # ==========================================================
+      # 上传 GitHub Actions Artifact
       # ==========================================================
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
           name: ponwrt-an7581-hg5382a-${{ needs.check-update.outputs.short_commit }}
-          path: |
-            ponwrt/${{ env.TARGET_DIR }}/*
+          path: ponwrt/${{ env.TARGET_DIR }}/*
           if-no-files-found: error
           retention-days: 30
 
@@ -427,7 +549,7 @@ jobs:
 
             - `hg5382a.config`
 
-            Build configuration:
+            Build:
 
             - `make defconfig`
             - `make -j$(nproc)`
