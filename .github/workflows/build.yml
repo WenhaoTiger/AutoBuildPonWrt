@@ -1,0 +1,259 @@
+name: Build PonWrt AN7581
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # 每天北京时间 04:00
+    # GitHub 使用 UTC
+    - cron: "0 20 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+
+  check:
+    name: Check PonWrt Update
+    runs-on: ubuntu-latest
+
+    outputs:
+      commit: ${{ steps.version.outputs.commit }}
+      tag: ${{ steps.version.outputs.tag }}
+      need_build: ${{ steps.version.outputs.need_build }}
+
+    steps:
+
+      - name: Get latest PonWrt commit
+        id: version
+        shell: bash
+        run: |
+          set -e
+
+          COMMIT=$(git ls-remote \
+            https://github.com/pbs05/ponwrt.git \
+            refs/heads/master \
+            | awk '{print $1}')
+
+          echo "Latest PonWrt commit:"
+          echo "$COMMIT"
+
+          TAG="ponwrt-an7581-${COMMIT:0:12}"
+
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          # 手动运行：强制编译
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual build requested."
+            echo "need_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 检查 Release 是否已经存在
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG")
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "This PonWrt commit has already been built."
+            echo "need_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New PonWrt commit detected."
+            echo "need_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+
+  build:
+    name: Build AN7581
+    needs: check
+
+    if: needs.check.outputs.need_build == 'true'
+
+    runs-on: ubuntu-24.04
+
+    steps:
+
+      # ========================================
+      # Clone PonWrt
+      # ========================================
+
+      - name: Clone PonWrt
+        run: |
+          git clone \
+            --depth=1 \
+            https://github.com/pbs05/ponwrt.git \
+            ponwrt
+
+      # ========================================
+      # Show version
+      # ========================================
+
+      - name: Show PonWrt version
+        working-directory: ponwrt
+        run: |
+          echo "PonWrt commit:"
+          git rev-parse HEAD
+
+      # ========================================
+      # Install dependencies
+      # ========================================
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            ack \
+            antlr3 \
+            asciidoc \
+            autoconf \
+            automake \
+            autopoint \
+            binutils \
+            bison \
+            build-essential \
+            bzip2 \
+            ccache \
+            clang \
+            cmake \
+            cpio \
+            curl \
+            device-tree-compiler \
+            ecj \
+            fastjar \
+            flex \
+            gawk \
+            gettext \
+            gcc-multilib \
+            g++-multilib \
+            git \
+            gnutls-dev \
+            gperf \
+            haveged \
+            help2man \
+            intltool \
+            lib32gcc-s1 \
+            libc6-dev-i386 \
+            libelf-dev \
+            libglib2.0-dev \
+            libgmp3-dev \
+            libltdl-dev \
+            libmpc-dev \
+            libmpfr-dev \
+            libncurses-dev \
+            libpython3-dev \
+            libreadline-dev \
+            libssl-dev \
+            libtool \
+            libyaml-dev \
+            libz-dev \
+            lld \
+            llvm \
+            lrzsz \
+            mkisofs \
+            msmtp \
+            nano \
+            ninja-build \
+            p7zip \
+            p7zip-full \
+            patch \
+            pkgconf \
+            python3 \
+            python3-pip \
+            python3-ply \
+            python3-docutils \
+            python3-pyelftools \
+            qemu-utils \
+            re2c \
+            rsync \
+            scons \
+            squashfs-tools \
+            subversion \
+            swig \
+            texinfo \
+            uglifyjs \
+            unzip \
+            vim \
+            wget \
+            xmlto \
+            xxd \
+            zlib1g-dev \
+            zstd
+
+      # ========================================
+      # Update feeds
+      # ========================================
+
+      - name: Update feeds
+        working-directory: ponwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # ========================================
+      # Official AN7581 configuration
+      # ========================================
+
+      - name: Configure AN7581
+        working-directory: ponwrt
+        run: |
+          cp configs/an7581.config .config
+          make defconfig
+
+      # ========================================
+      # Build
+      # ========================================
+
+      - name: Build AN7581
+        working-directory: ponwrt
+        run: |
+          make -j$(nproc)
+
+      # ========================================
+      # Show output
+      # ========================================
+
+      - name: List firmware
+        working-directory: ponwrt
+        run: |
+          echo "========================================"
+          echo "AN7581 firmware"
+          echo "========================================"
+
+          find bin/targets/airoha/an7581/ \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\n' \
+            | sort
+
+      # ========================================
+      # Create SHA256
+      # ========================================
+
+      - name: Generate SHA256SUMS
+        working-directory: ponwrt
+        run: |
+          cd bin/targets/airoha/an7581/
+
+          sha256sum \
+            *.bin \
+            *.itb \
+            *.manifest \
+            *.json \
+            2>/dev/null \
+            > SHA256SUMS || true
+
+          cat SHA256SUMS
+
+      # ========================================
+      # Upload GitHub Actions artifact
+      # ========================================
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ponwrt-an7581-${{ needs.check.outputs.commit }}
+          path: ponwrt/bin/targets/airoha/an7581/
+          if-no-files-found: error
+          retention-days: 30
+
