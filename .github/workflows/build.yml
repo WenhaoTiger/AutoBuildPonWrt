@@ -418,7 +418,7 @@ jobs:
           echo "Using:"
           echo "${CONFIG_FILE}"
 
-          cp "${CONFIG_FILE}" .config
+          cp configs/an7581.config .config
 
           echo
           echo "Target configuration before defconfig:"
