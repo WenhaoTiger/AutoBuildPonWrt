@@ -1,0 +1,125 @@
+name: Build PonWrt
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write # 创建 Release 需要
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: 释放磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
+          sudo apt-get -qq autoremove --purge -y || true
+          df -h
+
+      - name: 拉取源码
+        uses: actions/checkout@v4
+        with:
+          repository: pbs05/ponwrt
+          ref: master
+          fetch-depth: 1
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update -y
+          sudo bash -c 'bash <(curl -fsSL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+          sudo timedatectl set-timezone Asia/Shanghai || true
+
+      - name: 更新并安装 feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 载入配置
+        run: |
+          cp configs/an7581.config .config
+          make defconfig
+
+      - name: 下载源码包
+        run: |
+          make download -j8
+          # 清理可能下载失败的残缺文件后重试
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
+          make download -j8
+
+      - name: 编译固件
+        id: compile
+        run: |
+          echo "开始编译,使用 $(nproc) 线程"
+          make -j$(($(nproc) + 1)) || make -j1 V=s
+          echo "status=success" >> "$GITHUB_OUTPUT"
+          echo "DATE=$(date +%Y%m%d-%H%M)" >> "$GITHUB_ENV"
+          echo "SRC_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: 整理编译产物
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          OUT=/tmp/output
+          mkdir -p "$OUT"
+
+          # 固件目录下所有文件(镜像、manifest、sha256sums 等)
+          cp -a bin/targets/airoha/an7581/. "$OUT/"
+
+          # 编译配置,方便复现
+          cp .config "$OUT/an7581.config"
+
+          # 固件目录整体再打一个压缩包
+          tar -C bin/targets/airoha -czf \
+            "/tmp/PonWrt-an7581-${DATE}-all.tar.gz" an7581
+
+          echo "OUTPUT_DIR=$OUT" >> "$GITHUB_ENV"
+          echo "ARCHIVE=/tmp/PonWrt-an7581-${DATE}-all.tar.gz" >> "$GITHUB_ENV"
+          ls -lh "$OUT"
+
+      - name: 上传所有固件文件(Artifact)
+        if: steps.compile.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PonWrt-an7581-${{ env.DATE }}
+          path: ${{ env.OUTPUT_DIR }}/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 上传整体压缩包(Artifact)
+        if: steps.compile.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PonWrt-an7581-${{ env.DATE }}-all-tar
+          path: ${{ env.ARCHIVE }}
+          compression-level: 0
+          retention-days: 30
+
+      - name: 发布到 Release
+        if: steps.compile.outputs.status == 'success'
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: ${{ github.repository }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: an7581-${{ env.DATE }}
+          name: PonWrt an7581 ${{ env.DATE }}
+          body: |
+            自动编译的 PonWrt 固件(an7581),上游提交:${{ env.SRC_SHA }}
+            刷机有风险,请务必先备份原厂固件及校准/身份数据。
+          files: |
+            ${{ env.OUTPUT_DIR }}/*
+            ${{ env.ARCHIVE }}
+
+      - name: 编译失败时上传日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-an7581
+          path: |
+            .config
+            logs/
+          if-no-files-found: ignore
